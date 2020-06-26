@@ -46,6 +46,8 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 
+np.random.seed(42)
+torch.manual_seed(999)
 
 # In[23]:
 
@@ -91,8 +93,10 @@ class Autoencoder(torch.nn.Module):
         self.encoder = torch.nn.Sequential(
             torch.nn.Linear(self.n_in, self.n_hidden//2),
             torch.nn.Sigmoid(),
-            torch.nn.Linear(self.n_hidden//2, self.n_hidden // 2),
+            torch.nn.Linear(self.n_hidden//2, self.n_hidden//2),
             torch.nn.Sigmoid(),
+            # torch.nn.Linear(self.n_hidden // 2, self.n_hidden // 2),
+            # torch.nn.Sigmoid(),
             torch.nn.Linear(self.n_hidden // 2, self.n_hidden),
             torch.nn.Sigmoid()
         )
@@ -108,7 +112,7 @@ class Autoencoder(torch.nn.Module):
     def forward(self, inputs):
         # forward network will take encoder first
         hidden = self.encoder(inputs)
-        hidden_mean = torch.mean(hidden, dim=0)
+        hidden_mean = torch.mean(hidden, dim=0) # output of autoencoder
         sparsity_loss = torch.sum(self.kl_divergence(self.sparsity_target, hidden_mean))
         # decoder will take the final hidden layer from encoder
         return self.decoder(hidden), sparsity_loss
@@ -117,7 +121,7 @@ class Autoencoder(torch.nn.Module):
     def kl_divergence(self, p, q):
         return p * torch.log(p / q) + (1 - p) * torch.log((1 - p) / (1 - q))  # Kullback Leibler divergence
 
-    def fit(self, X, n_epoch=10, batch_size=64, en_shuffle=True):
+    def fit(self, X, n_epoch=10, batch_size=256, en_shuffle=True):
         for epoch in range(n_epoch):
             # if the data has to be shuffled
             if en_shuffle:
@@ -152,7 +156,7 @@ class Autoencoder(torch.nn.Module):
 
 
 class Sequence(nn.Module):
-    def __init__(self, nb_features=1, hidden_size=100, nb_layers=5, dropout=0.5):
+    def __init__(self, nb_features=1, hidden_size=5, nb_layers=5, dropout=0.5): # nb_layers = hidden layers of lstm
         super(Sequence, self).__init__()
         self.nb_features = nb_features
         self.hidden_size = hidden_size
@@ -275,8 +279,13 @@ def backtest(predictions, y):
             # don't trade
             index.append(index[-1])
     R = 100 * (sum(profit_buy) + sum(profit_sell))
+    # return index, real, R
+    mape = 0
+    for predictions, actual in zip(index, real):
+        mape += (predictions - actual) / actual
+    mape = mape / len(index)
+    print("MAPE: ", mape)
     return index, real, R
-
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', name="checkpoint"):
     """Saves checkpoint to disk"""
@@ -296,11 +305,11 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', name="checkpo
 # --------------------------- STEP 0: LOAD DATA -----------------------------
 # ---------------------------------------------------------------------------
 
-path = "./data/US1.AAPL_200619_200619.csv"
+path = "./dataset/US1.AAPL_190623_200623.csv"
 data_master = pd.read_csv(path, sep=",")
 
 # 600 is a bit more than 2 years of data
-num_datapoints = 392
+num_datapoints = 6415
 # roll by approx. 60 days - 3 months of trading days
 step_size = int(0.1 * num_datapoints)
 # calculate number of iterations we can do over the entire data set
@@ -319,7 +328,7 @@ for n in range(num_iterations):
 
     feats = data.iloc[:, 2:]
 
-    # This is a scaling of the inputs such that they are in an appropriate range
+    # # This is a scaling of the inputs such that they are in an appropriate range
     feats["<CLOSE>"].loc[:] = feats["<CLOSE>"].loc[:] / 1000
     feats["<OPEN>"].loc[:] = feats["<OPEN>"].loc[:] / 1000
     feats["<HIGH>"].loc[:] = feats["<HIGH>"].loc[:] / 1000
@@ -345,6 +354,12 @@ for n in range(num_iterations):
     # ---------------------------------------------------------------------------
     # ----------------------- STEP 2.0: NORMALIZE DATA --------------------------
     # ---------------------------------------------------------------------------
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(feats_train)
+    feats_train = scaler.transform(feats_train)
+    feats_validate = scaler.transform(feats_validate)
+    feats_test = scaler.transform(feats_test)
+
 
     data_close = pd.Series(np.concatenate((y_train, y_validate, y_test)))
 
@@ -384,14 +399,14 @@ for n in range(num_iterations):
     # ---------------------------------------------------------------------------
     # ------------- STEP 3: ENCODE FEATURES USING AUTOENCODER -----------
     # ---------------------------------------------------------------------------
-
-    num_hidden_1 = 16
-    num_hidden_2 = 16
-    num_hidden_3 = 16
-    num_hidden_4 = 16
-
-    n_epoch = 200  # 20000
-
+    # HIDDEN LAYERS UNITS FOR AUTOENCODER
+    num_hidden_1 = 10
+    num_hidden_2 = 10
+    num_hidden_3 = 10
+    num_hidden_4 = 10
+    # AUTORENCODER EPOCHS
+    n_epoch = 100  # 20000
+    start_time = time.time()
     # ---- train using training data
 
     # The n==0 statement is done because we only want to initialize the network once and then keep training
@@ -422,6 +437,7 @@ for n in range(num_iterations):
     auto3_out = auto3.encoder(auto2_out).data.numpy()
     auto4.fit(auto3_out, n_epoch=n_epoch)
 
+    print("Total training time: ", time.time() - start_time)
     # Change to evaluation mode, in this mode the network behaves differently, e.g. dropout is switched off and so on
     auto1.eval()
     auto2.eval()
@@ -431,19 +447,41 @@ for n in range(num_iterations):
     X_train = feats_norm_train
     X_train = torch.autograd.Variable(torch.from_numpy(X_train.astype(np.float32)))
     train_encoded = auto4.encoder(auto3.encoder(auto2.encoder(auto1.encoder(X_train))))
+    # train_encoded = auto1.encoder(X_train)
+
     train_encoded = train_encoded.data.numpy()
 
     # ---- encode validation and test data using autoencoder trained only on training data
     X_validate = feats_norm_validate_WT
     X_validate = torch.autograd.Variable(torch.from_numpy(X_validate.astype(np.float32)))
     validate_encoded = auto4.encoder(auto3.encoder(auto2.encoder(auto1.encoder(X_validate))))
+    # validate_encoded = auto1.encoder(X_validate)
+
     validate_encoded = validate_encoded.data.numpy()
 
     X_test = feats_norm_test_WT
     X_test = torch.autograd.Variable(torch.from_numpy(X_test.astype(np.float32)))
-    test_encoded = auto4.encoder(auto3.encoder(auto2.encoder(auto1.encoder(X_test))))
-    test_encoded = test_encoded.data.numpy()
+    test_encoded_ = auto4.encoder(auto3.encoder(auto2.encoder(auto1.encoder(X_test))))
+    # test_encoded = auto1.encoder(X_test)
+    test_encoded = test_encoded_.data.numpy()
 
+    """
+    RMSE for autoencoder
+    """
+    def find_mean_rmse(test_x, reconstr_layers):
+        sum_rmse = 0
+        for i in range(0, len(test_x)):
+            input_array = test_x[i]
+            reconstr_array = reconstr_layers[i]
+            current_rmse = (np.square(input_array - reconstr_array)).mean(axis=0)
+            sum_rmse += current_rmse
+        return sum_rmse / len(test_x)
+    test_decoded = auto1.decoder(auto2.decoder(auto3.decoder(auto4.decoder(test_encoded_))))
+    print("Training RMSE on autoencoder: ", find_mean_rmse(feats_norm_test_WT, test_decoded.data.numpy()))
+
+    """
+    End of RMSE
+    """
     # switch back to training mode
     auto1.train()
     auto2.train()
@@ -487,8 +525,8 @@ for n in range(num_iterations):
     # ---------------------------------------------------------------------------
     # ------------- STEP 5: TIME-SERIES REGRESSION USING LSTM -------------------
     # ---------------------------------------------------------------------------
-
-    batchsize = 128
+    # BATCH SIZE FOR LSTM
+    batchsize = 10
 
     trainloader = ExampleDataset(x_train, y_train, batchsize)
     valloader = ExampleDataset(x_validate, y_validate, 1)
@@ -500,7 +538,7 @@ for n in range(num_iterations):
 
     # build the model
     if n == 0:
-        seq = Sequence(num_hidden_4, hidden_size=64, nb_layers=4)
+        seq = Sequence(num_hidden_4, hidden_size=64, nb_layers=5) # LSTM
 
     resume = ""
 
@@ -525,7 +563,8 @@ for n in range(num_iterations):
     optimizer = optim.Adam(params=seq.parameters(), lr=0.0005)
 
     start_epoch = 0
-    epochs = 50  # 5000
+    # for LSTM
+    epochs = 25  # 5000
 
     global_loss_val = np.inf
     # begin to train
@@ -569,12 +608,12 @@ for n in range(num_iterations):
 
                 optimizer.step()
 
-        if i % 50 == 0:
+        if i % 100 == 0:
 
             plt.plot(pred_train, label = "Predicted train")
             plt.plot(target_train, label = "Actual train")
             plt.legend()
-            plt.show()
+            # plt.show()
 
             loss_val, pred_val, target_val = evaluate_lstm(dataloader=valloader, model=seq, criterion=criterion)
             print("RMSE loss on validation data: ", loss_val)
@@ -583,7 +622,7 @@ for n in range(num_iterations):
             # plt.scatter(range(len(pred_val)), pred_val, label="Predictions on validation")
             # plt.scatter(range(len(pred_val)), target_val, label=" Actual validation")
             plt.legend()
-            plt.show()
+            # plt.show()
 
             index, real, R = backtest(pred_val, y_validate)
             print("Strategy profitabliity for validation data: ", R)
@@ -624,7 +663,7 @@ for n in range(num_iterations):
 
     loss_test, preds_test, target_test = evaluate_lstm(dataloader=testloader, model=seq, criterion=criterion)
 
-    print("LOSS TEST: " + str(float(loss_test)))
+    print("RMSE loss on test data: " + str(float(loss_test)))
 
     temp2 = y_test.values.flatten().tolist()
     y_test_lst.extend(temp2)
@@ -634,7 +673,7 @@ for n in range(num_iterations):
     # plt.scatter(range(len(preds_test)), preds_test)
     # plt.scatter(range(len(y_test_lst)), y_test_lst)
     plt.legend()
-    plt.show()
+    # plt.show()
     plt.savefig("test_preds.pdf")
 
     # ---------------------------------------------------------------------------
@@ -648,14 +687,10 @@ for n in range(num_iterations):
     plt.plot(real, label="bm")
     plt.legend()
     plt.savefig("performance_article_way.pdf")
-    plt.show()
+    # plt.show()
     plt.close()
 
 # In[ ]:
 
 
 # In[ ]:
-
-
-
-
